@@ -10,45 +10,39 @@
   #loading{position:fixed;inset:0;background:#050A05;color:#39FF14;display:flex;
     align-items:center;justify-content:center;font-family:monospace;font-size:13px;z-index:99999;letter-spacing:2px;}
 </style>
-<!-- React + Babel (브라우저에서 JSX 변환, 빌드 불필요) -->
+<!-- React + Babel -->
 <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
 <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
 <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
-<!-- Firebase -->
-<script type="module">
-  import { initializeApp } from "https://www.gstatic.com/firebasejs/11.0.2/firebase-app.js";
-  import { getFirestore, doc, getDoc, setDoc } from "https://www.gstatic.com/firebasejs/11.0.2/firebase-firestore.js";
-
-  const firebaseConfig = {
+<!-- Firebase (compat = 일반 스크립트, 모듈 충돌 없음) -->
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
+<script>
+  // Firebase 초기화
+  var firebaseConfig = {
     apiKey: "AIzaSyDE6YGkmO5qsUzmVf7pBYDqml1z-sohcjQ",
     authDomain: "science-d2512.firebaseapp.com",
-    databaseURL: "https://science-d2512-default-rtdb.asia-southeast1.firebasedatabase.app",
     projectId: "science-d2512",
     storageBucket: "science-d2512.firebasestorage.app",
     messagingSenderId: "964689845832",
-    appId: "1:964689845832:web:7acde885c3a309f4e5c27d",
-    measurementId: "G-RY1GRPT267"
+    appId: "1:964689845832:web:7acde885c3a309f4e5c27d"
   };
+  firebase.initializeApp(firebaseConfig);
+  var db = firebase.firestore();
 
-  const app = initializeApp(firebaseConfig);
-  const db = getFirestore(app);
-
-  // 게임 코드의 window.storage API를 Firestore로 구현
-  // 컬렉션 "steam" 안에 문서 하나(key)당 {value: "..."} 저장
+  // 게임의 window.storage API를 Firestore로 구현
   window.storage = {
-    async get(key){
-      try {
-        const snap = await getDoc(doc(db, "steam", key));
-        if(snap.exists()) return { key, value: snap.data().value, shared:true };
+    get: function(key){
+      return db.collection("steam").doc(key).get().then(function(snap){
+        if(snap.exists) return { key:key, value:snap.data().value, shared:true };
         return null;
-      } catch(e){ console.error("storage.get", e); return null; }
+      }).catch(function(e){ console.error("storage.get", e); return null; });
     },
-    async set(key, value){
-      try {
-        await setDoc(doc(db, "steam", key), { value });
-        return { key, value, shared:true };
-      } catch(e){ console.error("storage.set", e); return null; }
-    },
+    set: function(key, value){
+      return db.collection("steam").doc(key).set({ value:value }).then(function(){
+        return { key:key, value:value, shared:true };
+      }).catch(function(e){ console.error("storage.set", e); return null; });
+    }
   };
   window.__storageReady = true;
 </script>

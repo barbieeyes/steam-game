@@ -10,9 +10,9 @@
   #loading{position:fixed;inset:0;background:#050A05;color:#39FF14;display:flex;
     align-items:center;justify-content:center;font-family:monospace;font-size:13px;z-index:99999;letter-spacing:2px;}
 </style>
-<!-- React + Babel -->
-<script crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
-<script crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<!-- React (jsdelivr = npm 미러, 경로 확실) -->
+<script src="https://cdn.jsdelivr.net/npm/react@18.2.0/umd/react.production.min.js" onerror="window.__libFail='React'"></script>
+<script src="https://cdn.jsdelivr.net/npm/react-dom@18.2.0/umd/react-dom.production.min.js" onerror="window.__libFail='ReactDOM'"></script>
 <!-- Firebase (compat = 일반 스크립트, 모듈 충돌 없음) -->
 <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js" onerror="window.__fbFail=1"></script>
 <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-firestore-compat.js" onerror="window.__fbFail=1"></script>
@@ -62,7 +62,8 @@
     window.__storageReady = true;
     console.log("Firebase 연결 완료");
   }
-  window.addEventListener("load", initFirebase);
+  // load 이벤트를 기다리지 않고 즉시 시작 (스크립트가 막혀도 재시도 로직이 처리)
+  initFirebase();
 </script>
 </head>
 <body>
@@ -143,7 +144,7 @@ const SENSOR_TYPES = {
   },
   beat: {
     label: "🎶 박자 댄스",
-    desc: "BPM에 맞춰 폰 흔들기 + 진동수 문제"
+    desc: "랜덤 깜빡임에 맞춰 폰 흔들기 + 진동수 문제"
   },
   ratio: {
     label: "📐 황금비율 탐색",
@@ -1388,8 +1389,8 @@ function BeatMission({
   target,
   onClear
 }) {
-  const bpm = target || 84;
-  const beatInterval = 60000 / bpm; // ms per beat
+  const BEAT_MS = 600; // 기본 박 (랜덤 변동 base)
+  const bpm = Math.round(60000 / BEAT_MS);
   const [phase, setPhase] = useState("intro"); // intro | dance | quiz | result
   const [accuracy, setAccuracy] = useState(0);
   const [beatOn, setBeatOn] = useState(false);
@@ -1399,6 +1400,10 @@ function BeatMission({
     period: ""
   });
   const [quizResult, setQuizResult] = useState(null);
+  const [motionOK, setMotionOK] = useState(true); // 센서 작동 여부
+  const [permMsg, setPermMsg] = useState(""); // 권한 상태 메시지
+  const [hitCount, setHitCount] = useState(0); // 화면 표시용 흔들기 횟수
+
   const motionData = useRef({
     hits: [],
     lastPeak: 0,
@@ -1406,53 +1411,74 @@ function BeatMission({
   });
   const refs = useRef({});
 
-  // 박자음 + 비트 타이밍 기록
-  const playClick = ctx => {
-    const osc = ctx.createOscillator(),
-      gain = ctx.createGain();
-    osc.connect(gain);
-    gain.connect(ctx.destination);
-    osc.frequency.value = 1000;
-    osc.type = "square";
-    gain.gain.setValueAtTime(0.2, ctx.currentTime);
-    gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.05);
-    osc.start();
-    osc.stop(ctx.currentTime + 0.05);
+  // 가속도 센서 시작 (아이폰은 권한 요청 필요)
+  const startMotion = () => {
+    const onMotion = e => {
+      const a = e.accelerationIncludingGravity || e.acceleration;
+      if (!a) return;
+      const mag = Math.abs(a.x || 0) + Math.abs(a.y || 0) + Math.abs(a.z || 0);
+      const now = performance.now();
+      if (mag > 18 && now - motionData.current.lastPeak > 160) {
+        motionData.current.lastPeak = now;
+        motionData.current.hits.push(now);
+        setHitCount(motionData.current.hits.length);
+        setMotionOK(true);
+      }
+    };
+    refs.current.onMotion = onMotion;
+    window.addEventListener("devicemotion", onMotion);
   };
   const startDance = () => {
+    // 아이폰(iOS 13+)은 흔들기 센서에 명시적 권한 필요
+    const DME = window.DeviceMotionEvent;
+    if (DME && typeof DME.requestPermission === "function") {
+      // 반드시 사용자 탭 핸들러 안에서 직접 호출돼야 팝업이 뜸
+      DME.requestPermission().then(function (state) {
+        if (state === "granted") {
+          setPermMsg("");
+          beginDance();
+        } else {
+          setPermMsg("⚠ 동작 권한이 거부됐어요. Safari 설정 > 동작 및 방향 접근을 켜주세요.");
+          beginDance();
+        }
+      }).catch(function (err) {
+        setPermMsg("⚠ 권한 요청 실패: " + (err && err.message ? err.message : "알 수 없음") + " (Safari에서 열어야 해요)");
+        beginDance();
+      });
+    } else if (DME) {
+      // 안드로이드/구형: 권한 불필요
+      beginDance();
+    } else {
+      setPermMsg("⚠ 이 기기/브라우저는 동작 센서를 지원하지 않아요.");
+      beginDance();
+    }
+  };
+  const beginDance = () => {
     setPhase("dance");
     setTimeLeft(30);
+    setHitCount(0);
     motionData.current = {
       hits: [],
       lastPeak: 0,
       beatTimes: []
     };
-    const ctx = new (window.AudioContext || window.webkitAudioContext)();
-    refs.current.ctx = ctx;
+    refs.current.timers = [];
+    startMotion();
 
-    // 박자 메트로놈
-    const beatTick = () => {
-      setBeatOn(true);
-      setTimeout(() => setBeatOn(false), 120);
-      playClick(ctx);
-      motionData.current.beatTimes.push(performance.now());
+    // 랜덤 간격으로 깜빡임 (400~900ms 사이 무작위)
+    const startTime = performance.now();
+    const scheduleNext = () => {
+      const delay = 400 + Math.random() * 500; // 0.4~0.9초 랜덤
+      const id = setTimeout(() => {
+        if (performance.now() - startTime > 30000) return;
+        setBeatOn(true);
+        motionData.current.beatTimes.push(performance.now());
+        setTimeout(() => setBeatOn(false), 180);
+        scheduleNext();
+      }, delay);
+      refs.current.timers.push(id);
     };
-    beatTick();
-    refs.current.beatTimer = setInterval(beatTick, beatInterval);
-
-    // 가속도 감지 (흔들기 피크)
-    const onMotion = e => {
-      const a = e.accelerationIncludingGravity;
-      if (!a) return;
-      const mag = Math.abs(a.x || 0) + Math.abs(a.y || 0) + Math.abs(a.z || 0);
-      const now = performance.now();
-      if (mag > 22 && now - motionData.current.lastPeak > 200) {
-        motionData.current.lastPeak = now;
-        motionData.current.hits.push(now);
-      }
-    };
-    refs.current.onMotion = onMotion;
-    window.addEventListener("devicemotion", onMotion);
+    scheduleNext();
 
     // 30초 카운트다운
     refs.current.countdown = setInterval(() => {
@@ -1466,48 +1492,48 @@ function BeatMission({
     }, 1000);
   };
   const finishDance = () => {
-    clearInterval(refs.current.beatTimer);
+    (refs.current.timers || []).forEach(clearTimeout);
+    clearInterval(refs.current.loop);
     clearInterval(refs.current.countdown);
     window.removeEventListener("devicemotion", refs.current.onMotion);
-    refs.current.ctx?.close();
 
-    // 박자 정확도 계산: 각 흔들기가 가장 가까운 비트와 얼마나 가까운지
+    // 박자 정확도 계산: 각 흔들기가 가장 가까운 깜빡임과 얼마나 가까운지
     const {
       hits,
       beatTimes
     } = motionData.current;
     if (hits.length === 0 || beatTimes.length === 0) {
       setAccuracy(0);
-      setPhase("result");
+      setPhase("dance-done");
       return;
     }
     let totalErr = 0,
       matched = 0;
+    const tol = 400;
     hits.forEach(h => {
       let minDiff = Infinity;
       beatTimes.forEach(b => {
         const d = Math.abs(h - b);
         if (d < minDiff) minDiff = d;
       });
-      if (minDiff < beatInterval / 2) {
+      if (minDiff < tol) {
         totalErr += minDiff;
         matched++;
       }
     });
-    // 정확도: 맞춘 비율 × 타이밍 정밀도
-    const hitRate = Math.min(matched / beatTimes.length, 1);
-    const avgErr = matched > 0 ? totalErr / matched : beatInterval;
-    const precision = Math.max(0, 1 - avgErr / (beatInterval / 2));
+    const hitRate = Math.min(matched / Math.max(beatTimes.length * 0.5, 1), 1);
+    const avgErr = matched > 0 ? totalErr / matched : tol;
+    const precision = Math.max(0, 1 - avgErr / tol);
     const acc = Math.round(hitRate * 0.6 * 100 + precision * 0.4 * 100);
     setAccuracy(Math.min(acc, 100));
     setPhase("dance-done");
   };
   useEffect(() => () => {
     // cleanup
-    clearInterval(refs.current.beatTimer);
+    (refs.current.timers || []).forEach(clearTimeout);
+    clearInterval(refs.current.loop);
     clearInterval(refs.current.countdown);
     if (refs.current.onMotion) window.removeEventListener("devicemotion", refs.current.onMotion);
-    refs.current.ctx?.close();
   }, []);
 
   // 진동수/주기 정답
@@ -1526,7 +1552,7 @@ function BeatMission({
   };
   return /*#__PURE__*/React.createElement(Panel, null, /*#__PURE__*/React.createElement(PanelHeader, {
     color: C.blue
-  }, "🎶 미션 — 박자 댄스 (BPM ", bpm, ")"), /*#__PURE__*/React.createElement("div", {
+  }, "🎶 미션 — 박자 댄스 (랜덤 비트)"), /*#__PURE__*/React.createElement("div", {
     style: {
       padding: 16,
       display: "flex",
@@ -1539,39 +1565,63 @@ function BeatMission({
       color: C.text,
       lineHeight: 1.8
     }
-  }, "폰을 손에 꼭 쥐고, 화면이 깜빡이는 박자에 맞춰", /*#__PURE__*/React.createElement("br", null), "30초간 몸을 흔들어라. 박자가 정확할수록 점수가 높다."), /*#__PURE__*/React.createElement("div", {
+  }, "폰을 손에 꼭 쥐고, 화면이 ", /*#__PURE__*/React.createElement("b", {
+    style: {
+      color: C.blue
+    }
+  }, "깜빡일 때마다"), /*#__PURE__*/React.createElement("br", null), "폰을 힘차게 흔들어라.", /*#__PURE__*/React.createElement("br", null), "깜빡임은 불규칙하게 나타난다 — 잘 보고 맞춰라!"), /*#__PURE__*/React.createElement("div", {
     style: {
       fontSize: 11,
       color: C.dim
     }
-  }, "※ 정확도 50% 이상 + 진동수 문제까지 풀어야 통과"), /*#__PURE__*/React.createElement(Btn, {
+  }, "📱 시작을 누르면 동작 센서 권한을 허용해주세요 · 정확도 50% 이상 + 진동수 문제 통과"), /*#__PURE__*/React.createElement(Btn, {
     full: true,
     color: C.blue,
     onClick: startDance
-  }, "🎵 시작 (소리 켜기)")), phase === "dance" && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
+  }, "🎵 시작 (센서 허용)")), phase === "dance" && /*#__PURE__*/React.createElement(React.Fragment, null, permMsg && /*#__PURE__*/React.createElement("div", {
+    style: {
+      padding: 8,
+      border: `1px solid ${C.yellow}`,
+      background: C.yellow + "11",
+      color: C.yellow,
+      fontSize: 10,
+      textAlign: "center"
+    }
+  }, permMsg), !motionOK && !permMsg && /*#__PURE__*/React.createElement("div", {
+    style: {
+      padding: 8,
+      border: `1px solid ${C.red}`,
+      background: C.red + "11",
+      color: C.red,
+      fontSize: 10,
+      textAlign: "center"
+    }
+  }, "⚠ 동작 센서가 감지되지 않습니다. 폰을 더 크게 흔들거나, 권한을 허용했는지 확인하세요."), /*#__PURE__*/React.createElement("div", {
     style: {
       textAlign: "center",
       padding: "10px 0"
     }
   }, /*#__PURE__*/React.createElement("div", {
     style: {
-      width: 120,
-      height: 120,
+      width: 130,
+      height: 130,
       borderRadius: "50%",
       margin: "0 auto",
       background: beatOn ? C.blue : C.bg,
       border: `4px solid ${C.blue}`,
-      transition: "all 0.1s",
+      transition: "all 0.08s",
       display: "flex",
+      flexDirection: "column",
       alignItems: "center",
       justifyContent: "center",
-      boxShadow: beatOn ? `0 0 30px ${C.blue}` : "none"
+      boxShadow: beatOn ? `0 0 40px ${C.blue}` : "none",
+      transform: beatOn ? "scale(1.15)" : "scale(1)"
     }
   }, /*#__PURE__*/React.createElement("span", {
     style: {
-      fontSize: 40
+      fontSize: 44
     }
-  }, beatOn ? "🔵" : "⚪")), /*#__PURE__*/React.createElement("div", {
+  }, beatOn ? "💥" : "⚪")), /*#__PURE__*/React.createElement("div", {
     style: {
       color: C.yellow,
       fontSize: 28,
@@ -1584,7 +1634,13 @@ function BeatMission({
       fontSize: 11,
       marginTop: 4
     }
-  }, "박자에 맞춰 흔들어라!")), /*#__PURE__*/React.createElement(Btn, {
+  }, "💥 깜빡일 때 흔들어라!"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: C.dim,
+      fontSize: 10,
+      marginTop: 2
+    }
+  }, "감지된 흔들기: ", hitCount, "회")), /*#__PURE__*/React.createElement(Btn, {
     full: true,
     color: C.red,
     onClick: finishDance
@@ -1994,14 +2050,14 @@ function CarbonMission({
   const balanced = cats.has("탄수") && cats.has("단백") && cats.has("채소");
   const km = (totalCO2 / 0.21).toFixed(0);
 
-  // 점수: 영양 균형 필수, 탄소 낮을수록 고점
+  // 점수: 탄소가 핵심. 균형은 가점. 탄소 높으면 무조건 저점.
   const calcScore = () => {
-    if (!balanced) return 40; // 불균형
-    if (totalCO2 <= 5) return 100;
-    if (totalCO2 <= 10) return 90;
-    if (totalCO2 <= 20) return 75;
-    if (totalCO2 <= 30) return 60;
-    return 50;
+    let score;
+    // 1) 탄소 기준 기본 점수 (낮을수록 높음)
+    if (totalCO2 <= 5) score = 90;else if (totalCO2 <= 10) score = 75;else if (totalCO2 <= 20) score = 55;else if (totalCO2 <= 35) score = 35;else score = 15; // 50kg+ 같은 탄소폭탄
+    // 2) 영양 균형이면 +10 가점
+    if (balanced) score += 10;
+    return Math.min(score, 100);
   };
   const score = calcScore();
 
@@ -2135,12 +2191,89 @@ function CarbonMission({
     style: {
       color: C.dim
     }
-  }, "· 담은 음식 ", tray.length, "개")), /*#__PURE__*/React.createElement(Btn, {
+  }, "· 담은 음식 ", tray.length, "개")), tray.length > 0 && /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 10
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: 1,
+      textAlign: "center",
+      padding: "10px",
+      border: `1px solid ${totalCO2 <= 10 ? C.green : totalCO2 <= 20 ? C.yellow : C.red}`,
+      background: C.bg
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: C.dim,
+      fontSize: 9
+    }
+  }, "현재 탄소"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: totalCO2 <= 10 ? C.green : totalCO2 <= 20 ? C.yellow : C.red,
+      fontSize: 24,
+      fontWeight: 900
+    }
+  }, totalCO2.toFixed(1), /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 11
+    }
+  }, "kg"))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: 1,
+      textAlign: "center",
+      padding: "10px",
+      border: `1px solid ${score >= 85 ? C.green : score >= 55 ? C.yellow : C.red}`,
+      background: C.bg
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: C.dim,
+      fontSize: 9
+    }
+  }, "예상 점수"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: score >= 85 ? C.green : score >= 55 ? C.yellow : C.red,
+      fontSize: 24,
+      fontWeight: 900
+    }
+  }, score, /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 11
+    }
+  }, "점"))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: 1,
+      textAlign: "center",
+      padding: "10px",
+      border: `1px solid ${balanced ? C.green : C.dim}`,
+      background: C.bg
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: C.dim,
+      fontSize: 9
+    }
+  }, "영양균형"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: balanced ? C.green : C.dim,
+      fontSize: 20,
+      fontWeight: 900,
+      marginTop: 2
+    }
+  }, balanced ? "✅" : "⚠"))), tray.length > 0 && !balanced && /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 10,
+      color: C.dim,
+      textAlign: "center"
+    }
+  }, "💡 탄수·단백·채소를 모두 담으면 +10점 (균형 보너스)"), /*#__PURE__*/React.createElement(Btn, {
     full: true,
     color: C.yellow,
     onClick: () => tray.length > 0 && setShown(true),
     disabled: tray.length === 0
-  }, "📊 탄소 분석")) : /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
+  }, "📊 자세한 분석 보기")) : /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
     style: {
       padding: 14,
       border: `1px solid ${score >= 75 ? C.green : C.yellow}`,
@@ -2998,14 +3131,21 @@ function MissionScreen({
     }
   }, /*#__PURE__*/React.createElement("div", {
     style: {
+      position: "sticky",
+      top: 0,
+      zIndex: 50,
+      background: C.bg,
       display: "flex",
       justifyContent: "space-between",
-      alignItems: "center"
+      alignItems: "center",
+      padding: "8px 0",
+      borderBottom: `1px solid ${C.border}`,
+      marginBottom: 2
     }
   }, /*#__PURE__*/React.createElement(Btn, {
     sm: true,
     onClick: onBack
-  }, "🗺 지도로"), /*#__PURE__*/React.createElement("span", {
+  }, "← 지도로 돌아가기"), /*#__PURE__*/React.createElement("span", {
     style: {
       padding: "4px 10px",
       fontSize: 10,
@@ -4049,8 +4189,8 @@ function SteamMission() {
   // ── 리더보드
   if (screen === "leaderboard") {
     const myRank = leaderboard.findIndex(t => t.name === teamName) + 1;
-    const maxScore = nonFinalRooms.length * 100 + 300; // 대략 만점 (final ×3 = 최대 300)
-    const myPct = myTeam.score ? Math.min(Math.round(myTeam.score / maxScore * 100), 100) : 0;
+    const totalMissions = rooms.length; // 전체 미션 수 (최종 포함)
+    const myPct = Math.round(myCompleted.length / totalMissions * 100);
     const tr = tempReduction(myPct);
     return /*#__PURE__*/React.createElement("div", {
       style: {
@@ -4164,7 +4304,7 @@ function SteamMission() {
         fontSize: 10,
         marginTop: 6
       }
-    }, "회복도 ", myPct, "% · 누적 ", myTeam.score, "점"))), /*#__PURE__*/React.createElement("div", {
+    }, "공해 해결 ", myCompleted.length, "/", totalMissions, " · 누적 ", myTeam.score, "점"))), /*#__PURE__*/React.createElement("div", {
       style: {
         color: C.dim,
         fontSize: 10,
@@ -4178,7 +4318,7 @@ function SteamMission() {
         fontSize: 12
       }
     }, "참가 팀 없음") : leaderboard.map((t, i) => {
-      const pct = t.score ? Math.min(Math.round(t.score / maxScore * 100), 100) : 0;
+      const pct = Math.round(t.completed / totalMissions * 100);
       const ttr = tempReduction(pct);
       return /*#__PURE__*/React.createElement("div", {
         key: t.name,
@@ -4228,12 +4368,12 @@ function SteamMission() {
   return null;
 }
 
-// 렌더 (storage shim 준비될 때까지 대기)
 function boot(){
+  if(window.__libFail){ document.getElementById("loading").innerHTML="\u26a0 "+window.__libFail+" \ub85c\ub529 \uc2e4\ud328"; return; }
+  if(typeof React==="undefined"||typeof ReactDOM==="undefined"){ setTimeout(boot,50); return; }
   if(!window.__storageReady){ setTimeout(boot, 50); return; }
   document.getElementById("loading").style.display = "none";
-  const root = ReactDOM.createRoot(document.getElementById("root"));
-  root.render(React.createElement(SteamMission));
+  ReactDOM.createRoot(document.getElementById("root")).render(React.createElement(SteamMission));
 }
 boot();
 </script>
